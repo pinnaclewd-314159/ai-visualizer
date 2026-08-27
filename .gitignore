@@ -1,6 +1,8 @@
 .DS_Store
 __pycache__/
 *.pyc
+logs/
+.browser-profile/
 .voice_state
 .voice_waveform
 .voice_loading_pid

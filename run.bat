@@ -20,9 +20,12 @@ rem ai-visualizer launcher (Windows). Python standard library only.
 rem   run.bat                  the real signal bus
 rem   run.bat --mock speaking  a synthesized state, no voice line needed
 cd /d "%~dp0"
+if not exist logs mkdir logs
 where py >nul 2>nul
 if %errorlevel%==0 (
-  py server.py %*
+  echo [%date% %time%] starting: py server.py %* >> logs\server.log
+  py server.py %* 2>&1 | powershell -NoProfile -Command "$input | Tee-Object -FilePath logs\server.log -Append"
 ) else (
-  python server.py %*
+  echo [%date% %time%] starting: python server.py %* >> logs\server.log
+  python server.py %* 2>&1 | powershell -NoProfile -Command "$input | Tee-Object -FilePath logs\server.log -Append"
 )

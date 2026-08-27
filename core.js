@@ -83,6 +83,14 @@ const AV = (() => {
     A.badge = String(cfg.badge || "");
     if (cfg.thinking_sound === false) A._sndWant = false;
     A.faces = cfg.faces || [];
+    // burn-in guard: dim to black after this many idle minutes with no
+    // state change and no user input. 0 (or unset) disables it — the
+    // face is already always in motion, so this is belt-and-suspenders.
+    A._idleDimMs = Math.max(0, Number(cfg.idle_dim_minutes) || 0) * 60000;
+    const dimOpacity = cfg.idle_dim_opacity;
+    A._idleDimOpacity = dimOpacity == null ? 0.85
+      : Math.max(0, Math.min(1, Number(dimOpacity)));
+    if (cfg.show_transcript !== false) transcriptInit(cfg.transcript_opacity);
     A._ready = true;
     A._readyCbs.forEach(cb => cb(A));
     A._readyCbs = [];
@@ -142,6 +150,101 @@ const AV = (() => {
         * Math.abs(Math.sin(tt * 0.61));
   }
 
+  /* ------------------------- idle-dim (burn-in guard) ---------------------- */
+  // Full-screen black overlay that fades in after A._idleDimMs of
+  // unbroken idle state and no user input, and fades out instantly on
+  // either. The face itself never stops animating underneath, so this
+  // is a second layer of protection, not the only one.
+  let dimEl = null, idleMs = 0;
+  function dimInit() {
+    if (SHOT) return;
+    dimEl = document.createElement("div");
+    dimEl.style.cssText =
+      "position:fixed;inset:0;background:#000;pointer-events:none;" +
+      "opacity:0;transition:opacity 4s ease;z-index:40";
+    document.body.appendChild(dimEl);
+    const wake = () => { idleMs = 0; };
+    addEventListener("mousemove", wake);
+    addEventListener("mousedown", wake);
+    addEventListener("keydown", wake);
+    addEventListener("touchstart", wake);
+  }
+  function dimUpdate(dt) {
+    if (!dimEl || !A._idleDimMs) return;
+    idleMs = A.state === "idle" ? idleMs + dt : 0;
+    dimEl.style.opacity = idleMs >= A._idleDimMs ? String(A._idleDimOpacity) : "0";
+  }
+
+  /* ------------------------- transcript panel ------------------------------ */
+  // Left-quarter, half-transparent scrolling readout of the actual
+  // conversation — tails backtalk's own session log via server.py's
+  // /log endpoint (already filtered to [you]/[Jarvis] lines there, so
+  // this only ever renders speech, never mic/model plumbing). Off in
+  // demo/shot modes: there's no real backtalk log to read there.
+  let tEl = null, tPoll = null, tKey = "";
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>]/g,
+      c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  }
+  // Which face this page is (the URL is always /faces/<id>/...) — lets
+  // the panel opacity vary per face, since a face's own colors/contrast
+  // can make the same value read differently (board needed darker).
+  function currentFaceId() {
+    const m = location.pathname.match(/\/faces\/([^/]+)\//);
+    return m ? m[1] : "";
+  }
+  function transcriptInit(opacityCfg) {
+    if (SHOT || DEMO || tEl) return;
+    const oc = opacityCfg || {};
+    const opacity = oc[currentFaceId()] ?? oc.default ?? 0.15;
+    const style = document.createElement("style");
+    style.textContent = ".av-transcript::-webkit-scrollbar{display:none}";
+    document.head.appendChild(style);
+    tEl = document.createElement("div");
+    tEl.className = "av-transcript";
+    tEl.style.cssText =
+      "position:fixed;left:0;top:0;width:25vw;height:100vh;" +
+      `background:#000;color:#cfe3ff;opacity:${opacity};` +
+      "font:12px/1.5 'SF Mono',Menlo,Consolas,monospace;" +
+      "padding:16px;box-sizing:border-box;overflow-y:scroll;" +
+      "scrollbar-width:none;-ms-overflow-style:none;" +
+      "white-space:pre-wrap;word-break:break-word;z-index:20;" +
+      "pointer-events:auto";
+    document.body.appendChild(tEl);
+    transcriptPoll();
+    tPoll = setInterval(transcriptPoll, 500);
+  }
+  async function transcriptPoll() {
+    if (!tEl) return;
+    let data;
+    try {
+      const r = await fetch("/log", { cache: "no-store" });
+      data = await r.json();
+    } catch (e) { return; }  // server gone: leave last content on screen
+    tEl.style.display = data.visible === false ? "none" : "block";
+    if (data.visible === false) return;  // hidden: skip the render work
+    const turns = data.turns;
+    if (!Array.isArray(turns)) return;
+    // fingerprint the newest line, not the array length — /log caps at
+    // TRANSCRIPT_MAX_LINES, so length alone stops changing once a long
+    // conversation fills the window and every new line just displaces
+    // the oldest one, which silently froze the panel before this fix.
+    const last = turns.length ? turns[turns.length - 1] : null;
+    const key = last ? `${last.time}|${last.who}|${last.text}|${turns.length}` : "";
+    if (key === tKey) return;
+    tKey = key;
+    tEl.innerHTML = turns.map(t => {
+      const you = t.who === "you";
+      const who = you ? "You" : (A.name || "Jarvis");
+      const color = you ? "#7fd7ff" : "#ffd77f";
+      return `<div style="margin-bottom:8px">` +
+        `<span style="color:${color};font-weight:600">${who}</span> ` +
+        `<span style="opacity:.45">${t.time}</span><br>` +
+        `${escapeHtml(t.text)}</div>`;
+    }).join("");
+    tEl.scrollTop = tEl.scrollHeight;
+  }
+
   /* ----------------------- envelope + samples easing ----------------------- */
   let peak = 0.05, sPeak = 200;
   function tick(dt) {
@@ -149,6 +252,7 @@ const AV = (() => {
     A.state = raw.state || "idle";
     A.alert = !!raw.alert;
     A.level = raw.level || 0;
+    dimUpdate(dt);
 
     // adaptive envelope: normalize against a decaying peak, then ease
     // (attack 50ms, release 350ms) — motion code rides AV.env
@@ -290,6 +394,7 @@ const AV = (() => {
     A._mic = !!opts.mic;
     if (A._mic && !DEMO) micStart();
     if (opts.sound !== false) soundInit(); else A._sndWant = false;
+    dimInit();
     if (DEMO) {
       applyConfig({ name: Q.get("name") || "JARVIS" });
     } else {

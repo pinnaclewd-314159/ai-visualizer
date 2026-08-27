@@ -31,6 +31,16 @@ Serves the face gallery at http://127.0.0.1:8790/ and exposes:
            faces, discovered by scanning the faces/ folder. Drop a new
            folder with an index.html into faces/ and it appears in the
            gallery. That is the whole plugin system.
+  /log     the transcript panel's live state, as JSON:
+           {"visible": bool,      false while .transcript_hidden exists
+                                   in the bus dir — toggled by a plain
+                                   "hide/show console" request, no
+                                   restart or reload needed
+            "turns": [{"time","who","text"}, ...]}  tailed from the
+                                   voice line's own logs/backtalk.log
+                                   ([you]/[Jarvis] lines only — the
+                                   technical [ears]/[mouth]/[turn]/etc
+                                   lines are filtered out), newest last
 
 READ-ONLY on the signal bus. The bus is three tiny files written by a
 voice line (backtalk writes them natively, github.com/jaredrhod/backtalk):
@@ -56,6 +66,10 @@ Ctrl-C stops.
 import json
 import math
 import mimetypes
+import os
+import re
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -74,7 +88,47 @@ DEFAULTS = {
     "port": 8790,
     "bus_dir": "",          # where the .voice_* files live ("" = here)
     "thinking_sound": True, # play assets/thinking.wav while thinking
+    "idle_dim_minutes": 0,  # fade to black after this many idle minutes
+                            # with no input (burn-in guard); 0 = off
+    "idle_dim_opacity": 0.85,  # how dark the fade goes, 0..1
+    "show_transcript": True,  # left-third live conversation panel
+    "transcript_opacity": {"default": 0.15},  # per-face panel opacity;
+                            # "default" applies unless a face id key
+                            # (e.g. "board") overrides it
 }
+
+TRANSCRIPT_LINE_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2} (\d{2}:\d{2}:\d{2}) \[(you|Jarvis)\]\s*(.*)$")
+TRANSCRIPT_LATENCY_RE = re.compile(r"^\(\d+(\.\d+)?s to first\)\s*")
+TRANSCRIPT_MAX_LINES = 300
+
+
+def read_transcript():
+    """Tail backtalk's own session log, keeping only the conversational
+    [you]/[Jarvis] lines (drops [ears]/[mouth]/[backtalk]/[turn]/[brain]
+    plumbing) so the panel reads as a transcript, not a debug feed."""
+    path = BUS / "logs" / "backtalk.log"
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        m = TRANSCRIPT_LINE_RE.match(line)
+        if not m:
+            continue
+        text = TRANSCRIPT_LATENCY_RE.sub("", m.group(3))
+        out.append({"time": m.group(1), "who": m.group(2), "text": text})
+    return out[-TRANSCRIPT_MAX_LINES:]
+
+
+def transcript_visible():
+    """Live on/off switch for the transcript panel — a plain marker file
+    in the bus dir, same style as .voice_alert (existence, not content,
+    is the signal). Toggled by Jarvis on a plain 'hide/show console'
+    request; polled every 500ms by the already-open browser, so it
+    takes effect instantly with no server restart or page reload."""
+    return not (BUS / ".transcript_hidden").exists()
 
 
 def load_config():
@@ -182,7 +236,15 @@ class Handler(BaseHTTPRequestHandler):
                 out = {"name": CFG["name"], "badge": CFG["badge"],
                        "face": CFG["face"],
                        "thinking_sound": bool(CFG["thinking_sound"]),
+                       "idle_dim_minutes": CFG["idle_dim_minutes"],
+                       "idle_dim_opacity": CFG["idle_dim_opacity"],
+                       "show_transcript": bool(CFG["show_transcript"]),
+                       "transcript_opacity": CFG["transcript_opacity"],
                        "faces": list_faces()}
+                self._send(json.dumps(out).encode(), "application/json")
+            elif path == "/log":
+                out = {"visible": transcript_visible(),
+                       "turns": read_transcript()}
                 self._send(json.dumps(out).encode(), "application/json")
             else:
                 self._static(path)
@@ -220,6 +282,55 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def _find_browser():
+    """Locate msedge/chrome on Windows. Neither sits on PATH by default,
+    so shutil.which() alone misses them; fall back to the same "App Paths"
+    registry key the shell uses to resolve `start msedge`."""
+    for exe in ("msedge.exe", "chrome.exe"):
+        path = shutil.which(exe)
+        if path:
+            return path
+        try:
+            import winreg
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}",
+            ) as key:
+                path = winreg.QueryValueEx(key, "")[0]
+                if path and Path(path).is_file():
+                    return path
+        except OSError:
+            continue
+    return None
+
+
+def _open_face(url):
+    """Open the face in a real, visible window, fullscreen where supported.
+
+    On Windows, handing the URL to the generic webbrowser.open() can land
+    in Edge's pre-warmed background instance (the --no-startup-window
+    process it keeps idle for fast launch) instead of popping a window
+    you can see. And if Edge/Chrome is already running under the user's
+    default profile at all, a plain launch just messages that existing
+    process over IPC and silently drops most startup switches, including
+    --start-fullscreen. A distinct --user-data-dir forces a genuinely
+    separate instance so the switches actually take effect.
+    """
+    if os.name == "nt":
+        path = _find_browser()
+        if path:
+            profile = HERE / ".browser-profile"
+            subprocess.Popen([
+                path,
+                f"--user-data-dir={profile}",
+                "--new-window",
+                "--start-fullscreen",
+                url,
+            ])
+            return
+    webbrowser.open(url)
+
+
 if __name__ == "__main__":
     mode = f"MOCK={MOCK}" if MOCK else f"bus: {BUS}"
     root = f"http://127.0.0.1:{PORT}/"
@@ -230,7 +341,7 @@ if __name__ == "__main__":
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     srv.allow_reuse_address = True
     if not NO_OPEN:
-        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+        threading.Timer(0.6, lambda: _open_face(url)).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

@@ -4,5 +4,9 @@
   "face": "board",
   "port": 8790,
   "bus_dir": "",
-  "thinking_sound": true
+  "thinking_sound": true,
+  "idle_dim_minutes": 0,
+  "idle_dim_opacity": 0.85,
+  "show_transcript": true,
+  "transcript_opacity": { "default": 0.15 }
 }

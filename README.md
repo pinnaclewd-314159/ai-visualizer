@@ -59,6 +59,16 @@ Point them at each other in either direction: set `bus_dir` in `ai-visualizer.js
 
 `assets/thinking.wav` is the processing sound from my videos, and it ships here because people kept asking for it. The face plays it in the browser while the agent thinks, and it automatically stays quiet when your voice line is already playing its own, so you never hear it twice. Move the mouse and a small SND toggle appears bottom left; browsers may need one click on the page before they allow audio at all. Turn it off for good with `"thinking_sound": false` in the config.
 
+## Burn-in guard (idle dim)
+
+The face is already always in motion, so it's mild insurance against burn-in on its own. For an always-on display, add a second layer: set `idle_dim_minutes` in the config to fade the whole screen toward black after that many minutes of unbroken idle state with no mouse or keyboard input. `idle_dim_opacity` (0 to 1, default 0.85) sets how dark the fade goes; 1 is fully black. `0` for either setting is effectively off — the default ships with `idle_dim_minutes: 0`, so nothing dims until you opt in. Any state change (a real conversation starting) or any input snaps it back instantly; the face keeps animating underneath the whole time, it's just covered by a fading overlay. Restart the server after changing either value.
+
+## Transcript panel
+
+A live, scrolling readout of the actual conversation down the left quarter of the screen, half-transparent so the face stays visible behind it — reads straight from backtalk's own `logs/backtalk.log`, showing only the spoken lines (not the mic/model plumbing lines that log also carries). On by default; set `"show_transcript": false` in the config to turn it off at startup (needs a server restart, like the other config keys). Needs `bus_dir` pointed at a real backtalk folder (see "Wire your voice" above) — it's blank in demo mode since there's no real conversation to read.
+
+To hide or reshow it **live**, with no restart, drop or remove a `.transcript_hidden` marker file in the bus folder — its mere existence, not its content, is the switch (same style as `.voice_alert`). The already-open browser checks this every 500ms, same poll as the transcript content itself, so it takes effect within a fraction of a second.
+
 ## On stream
 
 Each face is a browser page, so OBS takes it as a browser source pointed at the face URL, or you can fullscreen a window with the F key and capture that. The board's Space-key flythrough is rendered live over whatever the board is doing, which makes for an unreasonably good B-roll shot.

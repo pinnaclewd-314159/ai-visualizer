@@ -59,9 +59,9 @@ const Q=new URLSearchParams(location.search);
 const SHOT=Q.get("shot");
 AV.init({mic:true});
 
-const GLYPH_PX=20, FACE_GLYPH_PX=12, TIERS=16;
+const GLYPH_PX=27, FACE_GLYPH_PX=12, TIERS=16;
 const GREEN=[0,255,70], HEAD=[205,255,205], AMBER=[255,176,64], RED=[255,46,46];
-const RAIN_FADE_PER_SEC=170, MUTATE_PER_SEC=45;
+const RAIN_FADE_PER_SEC=450, MUTATE_PER_SEC=45;
 const RAIN_PROFILE={idle:[1.0,.80],listening:[.55,.45],thinking:[2.6,1.0],speaking:[.85,.55]};
 const FACE_ATTACK=700, FACE_RELEASE=1500;
 const THINKING_WORDS=["PROCESSING","THINKING","QUERYING MEMORY","COMPILING RESPONSE","RUNNING IT DOWN"];
