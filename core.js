@@ -91,6 +91,7 @@ const AV = (() => {
     A._idleDimOpacity = dimOpacity == null ? 0.85
       : Math.max(0, Math.min(1, Number(dimOpacity)));
     if (cfg.show_transcript !== false) transcriptInit(cfg.transcript_opacity);
+    rateLimitInit();
     A._ready = true;
     A._readyCbs.forEach(cb => cb(A));
     A._readyCbs = [];
@@ -243,6 +244,120 @@ const AV = (() => {
         `${escapeHtml(t.text)}</div>`;
     }).join("");
     tEl.scrollTop = tEl.scrollHeight;
+  }
+
+  /* ------------------------- rate-limit alert HUD ---------------------------- */
+  // Top-right corner readout — but real-alert-only, not a gauge: there
+  // is no SDK call that returns a live plan-usage percentage (the CLI
+  // only reports utilization on an actual threshold crossing, and
+  // omits it during normal "allowed" operation — upstream limitation,
+  // anthropics/claude-code#50518, closed not planned). So this element
+  // stays hidden until backtalk's own rate_limit_event handler writes
+  // a genuine transition to the bus, via server.py's /rate_limit.
+  // Amber while approaching a limit, solid red once actually hit;
+  // hides itself again the moment a later event reports "allowed".
+  // REWRITTEN 2026-09-16: an always-on readout, not an alert.
+  //
+  // The old version was alert-only and hidden by default, because at
+  // the time no live plan-usage percentage could be polled -- the CLI
+  // only reported utilization on an actual threshold crossing. Claude
+  // Code now passes `rate_limits` to the status line command on stdin,
+  // so `tools/statusline_usage.py` caches real numbers and server.py
+  // serves them. Verified against Sir's UI: 58% matched exactly.
+  //
+  // COLOUR IS DRIVEN BY THE 5-HOUR WINDOW ONLY (Sir's call, 2026-09-16):
+  // context auto-compacts at 97% so it looks after itself, and the
+  // weekly window is not a limit he realistically reaches. Both are
+  // still displayed, they just never drive the colour.
+  const RL_OK = "#ffffff", RL_WARN = "#ffb84d", RL_HIT = "#ff4d4d";
+  const RL_WARN_PCT = 80, RL_HIT_PCT = 95;
+  // Nothing writes this file unless a Claude Code session is live, so a
+  // reading can age. Showing an old percentage as if it were current
+  // would be a lie -- dim it and say so instead.
+  const RL_STALE_S = 300;
+  let rlEl = null, rlPoll = null, rlKey = null;
+
+  function rlAgo(sec) {
+    if (sec < 90) return `${Math.round(sec)}s`;
+    const m = Math.round(sec / 60);
+    return m < 90 ? `${m}m` : `${Math.round(m / 60)}h`;
+  }
+  function rlUntil(epoch) {
+    const s = epoch - Date.now() / 1000;
+    if (s <= 0) return "due";
+    const m = Math.round(s / 60), h = Math.floor(m / 60);
+    return h ? `${h}h${String(m % 60).padStart(2, "0")}m` : `${m}m`;
+  }
+
+  function rateLimitInit() {
+    if (SHOT || DEMO || rlEl) return;
+    rlEl = document.createElement("div");
+    rlEl.style.cssText =
+      "position:fixed;right:16px;top:16px;z-index:20;display:none;" +
+      "font:700 13px/1.4 'SF Mono',Menlo,Consolas,monospace;" +
+      "letter-spacing:.05em;pointer-events:none;text-align:right;" +
+      "text-shadow:0 0 8px currentColor";
+    document.body.appendChild(rlEl);
+    rateLimitPoll();
+    rlPoll = setInterval(rateLimitPoll, 3000);
+  }
+
+  async function rateLimitPoll() {
+    if (!rlEl) return;
+    let d;
+    try {
+      const r = await fetch("/rate_limit", { cache: "no-store" });
+      d = await r.json();
+    } catch (e) { return; }  // server gone: leave last reading on screen
+
+    if (!d || d.present === false || d.present === undefined) {
+      // No file yet, or rate_limits genuinely absent (pre-first-response
+      // / non-Pro plan). Say so rather than imply zero usage.
+      if (rlKey !== "none") {
+        rlKey = "none";
+        rlEl.style.color = RL_OK;
+        rlEl.style.opacity = "0.45";
+        rlEl.textContent = "usage n/a";
+        rlEl.style.display = "";
+      }
+      return;
+    }
+
+    const five = d.five_hour || {}, seven = d.seven_day || {};
+    const age = d.captured_at_epoch
+      ? Date.now() / 1000 - d.captured_at_epoch : null;
+    const stale = age !== null && age > RL_STALE_S;
+
+    const parts = [];
+    if (d.model) parts.push(d.model);
+    if (d.context_pct != null) parts.push(`ctx ${Math.round(d.context_pct)}%`);
+    if (five.used_percentage != null) {
+      let s = `5h ${Math.round(five.used_percentage)}%`;
+      if (five.resets_at) s += ` (${rlUntil(five.resets_at)})`;
+      parts.push(s);
+    }
+    if (seven.used_percentage != null) {
+      let s = `7d ${Math.round(seven.used_percentage)}%`;
+      if (seven.resets_at) s += ` (${rlUntil(seven.resets_at)})`;
+      parts.push(s);
+    }
+    let text = parts.join(" | ");
+    if (stale) text += `  (stale ${rlAgo(age)})`;
+
+    // Colour: 5-hour window only. Falls back to white on its own as the
+    // percentage drops at reset -- no special "reset" handling needed.
+    const p = five.used_percentage;
+    const colour = p == null ? RL_OK
+      : p >= RL_HIT_PCT ? RL_HIT
+      : p >= RL_WARN_PCT ? RL_WARN : RL_OK;
+
+    const key = text + "|" + colour;
+    if (key === rlKey) return;   // repaint only on a real change
+    rlKey = key;
+    rlEl.style.color = colour;
+    rlEl.style.opacity = stale ? "0.5" : "1";
+    rlEl.textContent = text;
+    rlEl.style.display = "";
   }
 
   /* ----------------------- envelope + samples easing ----------------------- */

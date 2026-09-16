@@ -41,14 +41,25 @@ Serves the face gallery at http://127.0.0.1:8790/ and exposes:
                                    ([you]/[Jarvis] lines only — the
                                    technical [ears]/[mouth]/[turn]/etc
                                    lines are filtered out), newest last
+  /rate_limit  the last real plan-usage alert from the CLI itself, JSON:
+           {"status": "allowed_warning"|"rejected"|"allowed"|null,
+            "rate_limit_type": "five_hour"|"seven_day"|..., "resets_at":
+            unix ts}  written the instant the CLI reports a transition;
+                                   null if none has happened this
+                                   session. Real-alert-only, not a
+                                   gauge — the SDK never exposes a live
+                                   percentage during normal use.
 
-READ-ONLY on the signal bus. The bus is three tiny files written by a
-voice line (backtalk writes them natively, github.com/jaredrhod/backtalk):
+READ-ONLY on the signal bus. The bus is tiny files written by a voice
+line (backtalk writes them natively, github.com/jaredrhod/backtalk):
 
   .voice_state        idle | listening | thinking | speaking
   .voice_waveform     JSON {ts, samples: [64 floats]} while audio plays
   .voice_loading_pid  exists while the voice line plays a thinking sound
   .voice_alert        optional: non-empty file = attention needed
+  .rate_limit_alert   JSON {ts, status, rate_limit_type, resets_at} the
+                       instant the CLI reports a real rate-limit
+                       transition
 
 Where the bus lives comes from "bus_dir" in ai-visualizer.json (default:
 this folder). Point it at your backtalk folder, or point backtalk's
@@ -120,6 +131,49 @@ def read_transcript():
         text = TRANSCRIPT_LATENCY_RE.sub("", m.group(3))
         out.append({"time": m.group(1), "who": m.group(2), "text": text})
     return out[-TRANSCRIPT_MAX_LINES:]
+
+
+USAGE_FILE = Path(r"C:\Users\JARVIS\my-agent\tools\usage\rate_limits.json")
+
+
+def read_rate_limit():
+    """Live plan usage: percentages, reset times, context and model.
+
+    REWRITTEN 2026-09-16. This used to read backtalk's
+    `.rate_limit_alert`, which only ever carried a threshold *crossing*
+    off the CLI's rate_limit_event stream -- so the widget was
+    alert-only and the old comment here asserted, correctly at the time,
+    that no live plan-usage percentage could be polled at all.
+
+    That is no longer true. Claude Code passes a `rate_limits` object to
+    the status line command on stdin (documented, official), and
+    `tools/statusline_usage.py` caches the whole payload to the file
+    below. Verified against Sir's own UI on 2026-09-16: 58% matched.
+
+    `captured_at_epoch` is passed through deliberately so the browser
+    can tell live from stale. The writer is whichever Claude Code
+    session is running; with none running nothing updates it, and
+    showing an old percentage as if it were current would be a lie.
+    Staleness is the browser's call, not filtered out here."""
+    try:
+        payload = json.loads(USAGE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    if not payload.get("rate_limits_present"):
+        # Genuinely absent (pre-first-response, or a non-Pro/Max plan).
+        # A real state, not an error -- let the face say so.
+        return {"present": False,
+                "captured_at_epoch": payload.get("captured_at_epoch")}
+    rl = payload.get("rate_limits") or {}
+    ctx = payload.get("context_window") or {}
+    return {
+        "present": True,
+        "captured_at_epoch": payload.get("captured_at_epoch"),
+        "model": payload.get("model"),
+        "context_pct": ctx.get("used_percentage"),
+        "five_hour": rl.get("five_hour"),
+        "seven_day": rl.get("seven_day"),
+    }
 
 
 def transcript_visible():
@@ -245,6 +299,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/log":
                 out = {"visible": transcript_visible(),
                        "turns": read_transcript()}
+                self._send(json.dumps(out).encode(), "application/json")
+            elif path == "/rate_limit":
+                out = read_rate_limit() or {"status": None}
                 self._send(json.dumps(out).encode(), "application/json")
             else:
                 self._static(path)
