@@ -20,12 +20,73 @@ rem ai-visualizer launcher (Windows). Python standard library only.
 rem   run.bat                  the real signal bus
 rem   run.bat --mock speaking  a synthesized state, no voice line needed
 cd /d "%~dp0"
+
+rem FIND A PYTHON THAT ACTUALLY RUNS, and validate it by RUNNING it.
+rem
+rem A clean Windows 11 has no Python but still answers to the name: the
+rem Store leaves an execution alias on PATH, so `where python` finds a
+rem real file and succeeds, and that file then exits 9009 the moment you
+rem run it. A locate-only check is therefore worse than no check at all,
+rem because it passes and the launch fails anyway. Only executing an
+rem interpreter proves one is there.
+rem
+rem `if errorlevel` is used rather than %errorlevel%, which expands when a
+rem block is PARSED and would test a stale value from an earlier command.
+set "PY="
+
+py -3 -c "pass" >nul 2>nul
+if not errorlevel 1 set "PY=py -3"
+
+if not defined PY (
+  python -c "pass" >nul 2>nul
+  if not errorlevel 1 set "PY=python"
+)
+
+if not defined PY (
+  python3 -c "pass" >nul 2>nul
+  if not errorlevel 1 set "PY=python3"
+)
+
+rem Last, and on a full agent stack it is the one interpreter guaranteed to
+rem exist: the voice line's own virtual environment, which uv builds during
+rem install. This server is standard library only, so any Python 3 runs it.
+rem The path stays relative so a folder name with a space cannot break it.
+if not defined PY (
+  if exist "..\backtalk\.venv\Scripts\python.exe" set "PY=..\backtalk\.venv\Scripts\python.exe"
+)
+
+if not defined PY (
+  echo.
+  echo   No working Python was found, so the face cannot start.
+  echo.
+  echo   Windows ships a decoy: a "python" on PATH that does nothing but
+  echo   open the Microsoft Store, and that is what is happening here.
+  echo.
+  echo   Install the real one from https://www.python.org/downloads/ and
+  echo   tick "Add python.exe to PATH" during setup, then run this again.
+  echo.
+  pause
+  exit /b 1
+)
+
+rem Every line the face prints is copied to logs\server.log so a crash or
+rem traceback can be read after the window is gone. A pipe hides the
+rem server's exit code from this script, so a failure drops a flag file
+rem instead, and the window holds on that.
+rem Add-Content per line, not Tee-Object: Tee holds the log open for the
+rem server's whole life (a second launch then cannot write it) and writes
+rem UTF-16 under Windows PowerShell 5.1.
 if not exist logs mkdir logs
-where py >nul 2>nul
-if %errorlevel%==0 (
-  echo [%date% %time%] starting: py server.py %* >> logs\server.log
-  py server.py %* 2>&1 | powershell -NoProfile -Command "$input | Tee-Object -FilePath logs\server.log -Append"
-) else (
-  echo [%date% %time%] starting: python server.py %* >> logs\server.log
-  python server.py %* 2>&1 | powershell -NoProfile -Command "$input | Tee-Object -FilePath logs\server.log -Append"
+if exist logs\.face_failed del logs\.face_failed
+echo [%date% %time%] starting: %PY% server.py %* >> logs\server.log
+(%PY% server.py %* 2>&1 || type nul > logs\.face_failed) | powershell -NoProfile -Command "$input | ForEach-Object { $_; Add-Content -LiteralPath logs\server.log -Value $_ -Encoding UTF8 }"
+
+rem Hold the window on a failure. This is usually launched detached, where
+rem a crash would otherwise close instantly and tell the user nothing.
+if exist logs\.face_failed (
+  del logs\.face_failed
+  echo.
+  echo   The face stopped with an error. The message is above.
+  echo   The log lives in ai-visualizer\logs\server.log
+  pause
 )

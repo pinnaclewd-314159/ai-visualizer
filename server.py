@@ -85,6 +85,9 @@ import sys
 import threading
 import time
 import webbrowser
+import urllib.request
+import errno
+import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -244,7 +247,13 @@ def mock_bus():
             for i in range(64)
         ]
     return {"state": MOCK, "level": level, "samples": samples,
-            "alert": False, "loading": MOCK == "thinking"}
+            "alert": False, "loading": MOCK == "thinking",
+            # Faked so the usage readout can be looked at without
+            # spending a real session to make it appear.
+            "rate_limits": {
+                "five_hour": {"utilization": 0.34, "resets_at": t + 9200},
+                "seven_day": {"utilization": 0.61, "resets_at": t + 288000},
+            }}
 
 
 def read_bus():
@@ -275,8 +284,16 @@ def read_bus():
     except OSError:
         alert = False
     loading = (BUS / ".voice_loading_pid").exists()
+    # Absent unless the voice line was told to publish it, which is the
+    # normal case: it is the account holder's own spend and it stays off
+    # until asked for. An empty dict simply means no readout.
+    rate_limits = {}
+    try:
+        rate_limits = json.loads((BUS / ".voice_rate_limits").read_text())
+    except (OSError, ValueError):
+        pass
     return {"state": state, "level": level, "samples": samples,
-            "alert": alert, "loading": loading}
+            "alert": alert, "loading": loading, "rate_limits": rate_limits}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -314,12 +331,23 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._static(path)
         except ConnectionError:
-            # Browser went away mid-response (reload/close): broken pipe,
-            # WinError 10053 aborted, or reset. Nothing to answer.
+            # THE WHOLE FAMILY, not one member of it. A tab closed or
+            # reloaded mid-response raises ConnectionResetError, which is a
+            # SIBLING of BrokenPipeError rather than a subclass -- so
+            # catching only BrokenPipeError sent it to the generic branch
+            # below, which then wrote a 500 back down the socket that had
+            # just died and raised a SECOND, uncaught error from inside
+            # flush_headers(). One disconnect, two tracebacks. ConnectionError
+            # is the common parent of Reset, Broken, Aborted and Refused.
             pass
         except Exception as e:
             body = json.dumps({"error": str(e)}).encode()
-            self._send(body, "application/json", 500)
+            try:
+                self._send(body, "application/json", 500)
+            except ConnectionError:
+                # A real error AND the client already gone. There is nobody
+                # left to tell; saying so twice helps no one.
+                pass
 
     def _static(self, path):
         if path == "/":
@@ -347,6 +375,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *a):
         pass
+
+
+class FaceServer(ThreadingHTTPServer):
+    # ONE SERVER PER PORT, ON WINDOWS TOO. http.server turns on
+    # SO_REUSEADDR, and on Windows that lets a second process bind a port
+    # another one is already listening on, so a relaunch silently became a
+    # second face instead of hitting the "already running" branch below.
+    # SO_EXCLUSIVEADDRUSE makes that second bind fail with EADDRINUSE.
+    # Elsewhere SO_REUSEADDR only skips TIME_WAIT, which is what we want.
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET,
+                                   socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 def _find_browser():
@@ -404,9 +448,37 @@ if __name__ == "__main__":
     # The browser opens on the configured face; the gallery stays at "/" for switching.
     face = CFG.get("face", "")
     url = f"{root}faces/{face}/" if face and (HERE / "faces" / face / "index.html").exists() else root
+    # ALREADY RUNNING IS NOT AN ERROR, and treating it as one was the whole
+    # bug. Closing the browser tab does not stop this server; it keeps going
+    # headless. Relaunching then failed to bind, died before the line that
+    # opens the browser, and took the traceback with it when the launcher
+    # window closed. The end-user symptom was "I can hear my agent but the
+    # face never shows up", with the face running perfectly the entire time.
+    try:
+        srv = FaceServer(("127.0.0.1", PORT), Handler)
+    except OSError as e:
+        if e.errno not in (errno.EADDRINUSE, errno.EACCES):
+            raise
+        # Something holds the port. Ask it whether it is us before claiming
+        # anything: a stranger on this port is a different problem and
+        # deserves a different sentence.
+        mine = False
+        try:
+            with urllib.request.urlopen(root + "state", timeout=2) as r:
+                mine = r.status == 200
+        except Exception:
+            mine = False
+        if mine:
+            print(f"already running at {root}  opening it instead", flush=True)
+            if not NO_OPEN:
+                webbrowser.open(url)
+            sys.exit(0)
+        print(f"port {PORT} is taken by something that is not this server.",
+              flush=True)
+        print("Close whatever is using it, or set a different \"port\" in "
+              "ai-visualizer.json.", flush=True)
+        sys.exit(1)
     print(f"ai-visualizer on {root}  opening {url}  ({mode})  Ctrl-C stops", flush=True)
-    srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    srv.allow_reuse_address = True
     if not NO_OPEN:
         threading.Timer(0.6, lambda: _open_face(url)).start()
     try:
