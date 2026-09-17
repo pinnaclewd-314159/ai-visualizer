@@ -280,6 +280,14 @@ def read_bus():
 
 
 class Handler(BaseHTTPRequestHandler):
+    def handle(self):
+        # A reset before the request line is even read raises inside the
+        # stdlib, outside do_GET. Same cause as below; nothing to answer.
+        try:
+            super().handle()
+        except ConnectionError:
+            pass
+
     def do_GET(self):
         path = self.path.split("?")[0]
         try:
@@ -305,7 +313,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(json.dumps(out).encode(), "application/json")
             else:
                 self._static(path)
-        except BrokenPipeError:
+        except ConnectionError:
+            # Browser went away mid-response (reload/close): broken pipe,
+            # WinError 10053 aborted, or reset. Nothing to answer.
             pass
         except Exception as e:
             body = json.dumps({"error": str(e)}).encode()
